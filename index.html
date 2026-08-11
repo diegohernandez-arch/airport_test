@@ -23,6 +23,7 @@
     touch-action: none; /* let us handle drag/pinch ourselves */
   }
   canvas.dragging { cursor: grabbing; }
+  canvas.hotspot-hover { cursor: pointer; }
 
   #status {
     position: fixed;
@@ -203,6 +204,108 @@
     return Math.min(max, Math.max(min, v));
   }
 
+  // ---- Hotspots ------------------------------------------------------------
+  // Each hotspot is tracked at a handful of keyframes (from the coordinate
+  // picker tool) as a fraction (0-1) of the source frame image's own width
+  // and height. Because ctx.drawImage always scales the *entire* source
+  // image into (w, h) regardless of aspect ratio, "x + xPct * w" lines up
+  // correctly with the visible frame at any zoom level or window size.
+  const HOTSPOTS = [
+    {
+      id: "spot1",
+      label: "Hotspot",
+      onClick: (spot) => {
+        // Customize this: navigate, open the overlay, show info, etc.
+        console.log("Hotspot clicked:", spot.label, "at frame", frame);
+      },
+      keyframes: [
+        { frame: 0,   xPct: 0.3886, yPct: 0.4044 },
+        { frame: 15,  xPct: 0.4464, yPct: 0.3832 },
+        { frame: 30,  xPct: 0.5026, yPct: 0.3802 },
+        { frame: 45,  xPct: 0.5587, yPct: 0.3938 },
+        { frame: 60,  xPct: 0.6097, yPct: 0.4165 },
+        { frame: 75,  xPct: 0.6540, yPct: 0.4528 },
+        { frame: 90,  xPct: 0.6821, yPct: 0.5042 },
+        { frame: 105, xPct: 0.6940, yPct: 0.5678 },
+        { frame: 120, xPct: 0.6761, yPct: 0.6388 },
+        { frame: 135, xPct: 0.6183, yPct: 0.7099 },
+        { frame: 150, xPct: 0.5221, yPct: 0.7553 },
+        { frame: 165, xPct: 0.4064, yPct: 0.7432 },
+        { frame: 180, xPct: 0.3239, yPct: 0.6827 },
+        { frame: 195, xPct: 0.2873, yPct: 0.5935 },
+        { frame: 210, xPct: 0.2967, yPct: 0.5058 },
+        { frame: 225, xPct: 0.3375, yPct: 0.4437 }
+      ]
+    }
+  ];
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  // Finds the two keyframes surrounding `frame` (wrapping from the last
+  // keyframe back to the first, since the rotation itself loops) and
+  // linearly interpolates the hotspot's position between them.
+  function interpolateHotspot(keyframes, frameIndex, totalFrames) {
+    const n = keyframes.length;
+    if (n === 0) return null;
+    if (n === 1) return keyframes[0];
+
+    for (let i = 0; i < n; i++) {
+      const cur = keyframes[i];
+      const next = keyframes[(i + 1) % n];
+      let curFrame = cur.frame;
+      let nextFrame = next.frame;
+      if (nextFrame <= curFrame) nextFrame += totalFrames; // wrap segment
+
+      if (frameIndex >= curFrame && frameIndex <= nextFrame) {
+        const t = (frameIndex - curFrame) / (nextFrame - curFrame);
+        return {
+          xPct: lerp(cur.xPct, next.xPct, t),
+          yPct: lerp(cur.yPct, next.yPct, t)
+        };
+      }
+    }
+    return keyframes[0];
+  }
+
+  function drawHotspotMarker(cx, cy) {
+    const dpr = window.devicePixelRatio || 1;
+    const r = 10 * dpr;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255, 59, 48, 0.35)";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 0.45, 0, Math.PI * 2);
+    ctx.fillStyle = "#ff3b30";
+    ctx.fill();
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = "#fff";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function hitTestHotspot(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = (clientX - rect.left) * scaleX;
+    const py = (clientY - rect.top) * scaleY;
+    const hitRadius = 22 * (window.devicePixelRatio || 1);
+
+    for (const spot of HOTSPOTS) {
+      if (spot._screenX == null) continue;
+      if (Math.hypot(px - spot._screenX, py - spot._screenY) <= hitRadius) {
+        return spot;
+      }
+    }
+    return null;
+  }
+
   // ---- Canvas sizing (handles resize + retina screens) --------------------
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
@@ -233,6 +336,14 @@
     const y = (canvas.height - h) / 2;
 
     ctx.drawImage(img, x, y, w, h);
+
+    HOTSPOTS.forEach(spot => {
+      const pos = interpolateHotspot(spot.keyframes, frame, TOTAL_FRAMES);
+      if (!pos) return;
+      spot._screenX = x + pos.xPct * w;
+      spot._screenY = y + pos.yPct * h;
+      drawHotspotMarker(spot._screenX, spot._screenY);
+    });
   }
 
   // ---- Preload frames ---------------------------------------------------
@@ -280,15 +391,25 @@
   }
 
   // ---- Pointer-based drag (works for mouse + touch + pen) -----------------
+  const CLICK_MOVE_THRESHOLD_PX = 6; // below this, treat pointerup as a tap
+  let downX = 0, downY = 0;
+
   function onPointerDown(e) {
     dragging = true;
     lastX = e.clientX;
+    downX = e.clientX;
+    downY = e.clientY;
+    canvas.classList.remove("hotspot-hover");
     canvas.classList.add("dragging");
     canvas.setPointerCapture(e.pointerId);
   }
 
   function onPointerMove(e) {
-    if (!dragging) return;
+    if (!dragging) {
+      const hit = hitTestHotspot(e.clientX, e.clientY);
+      canvas.classList.toggle("hotspot-hover", !!hit);
+      return;
+    }
 
     const delta = e.clientX - lastX;
     if (Math.abs(delta) < DRAG_SENSITIVITY_PX) return;
@@ -304,6 +425,12 @@
     canvas.classList.remove("dragging");
     if (canvas.hasPointerCapture && canvas.hasPointerCapture(e.pointerId)) {
       canvas.releasePointerCapture(e.pointerId);
+    }
+
+    const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+    if (moved <= CLICK_MOVE_THRESHOLD_PX) {
+      const hit = hitTestHotspot(e.clientX, e.clientY);
+      if (hit) hit.onClick(hit);
     }
   }
 
