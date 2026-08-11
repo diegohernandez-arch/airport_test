@@ -268,6 +268,25 @@
         { frame: 210, xPct: 0.2967, yPct: 0.5058 },
         { frame: 225, xPct: 0.3375, yPct: 0.4437 }
       ]
+    },
+    {
+      // Only visible on the side of the building where it was actually
+      // marked — frames 46-194 are skipped (large gap) so it hides itself
+      // there instead of drifting across the model. See
+      // HOTSPOT_HIDDEN_GAP_FRAMES below if you want to tune that threshold.
+      id: "spot_1786440797814",
+      type: "annotation",
+      label: "DROPOFF",
+      keyframes: [
+        { frame: 0,   xPct: 0.5264, yPct: 0.5574 },
+        { frame: 15,  xPct: 0.5020, yPct: 0.5649 },
+        { frame: 30,  xPct: 0.4784, yPct: 0.5589 },
+        { frame: 45,  xPct: 0.4600, yPct: 0.5499 },
+        { frame: 195, xPct: 0.5570, yPct: 0.5006 },
+        { frame: 210, xPct: 0.5563, yPct: 0.5259 },
+        { frame: 225, xPct: 0.5458, yPct: 0.5478 },
+        { frame: 239, xPct: 0.5277, yPct: 0.5576 }
+      ]
     }
   ];
 
