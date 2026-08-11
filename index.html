@@ -296,9 +296,16 @@
     return keyframes[((i % n) + n) % n];
   }
 
+  // If two consecutive keyframes are farther apart than this, the point was
+  // presumably occluded/off-screen for that stretch (you skipped marking it)
+  // rather than just needing denser sampling — so the hotspot is hidden
+  // during that range instead of being interpolated straight across it.
+  const HOTSPOT_HIDDEN_GAP_FRAMES = 40;
+
   // Finds the two keyframes surrounding `frame` (wrapping from the last
   // keyframe back to the first, since the rotation itself loops) and
-  // spline-interpolates the hotspot's position through them.
+  // spline-interpolates the hotspot's position through them. Returns null
+  // if `frame` falls inside a gap too large to trust (see above).
   function interpolateHotspot(keyframes, frameIndex, totalFrames) {
     const n = keyframes.length;
     if (n === 0) return null;
@@ -312,6 +319,7 @@
       if (nextFrame <= curFrame) nextFrame += totalFrames; // wrap segment
 
       if (frameIndex >= curFrame && frameIndex <= nextFrame) {
+        if (nextFrame - curFrame > HOTSPOT_HIDDEN_GAP_FRAMES) return null;
         const t = (frameIndex - curFrame) / (nextFrame - curFrame);
         const p0 = circularKeyframe(keyframes, i - 1);
         const p3 = circularKeyframe(keyframes, i + 2);
