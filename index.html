@@ -210,14 +210,46 @@
   // and height. Because ctx.drawImage always scales the *entire* source
   // image into (w, h) regardless of aspect ratio, "x + xPct * w" lines up
   // correctly with the visible frame at any zoom level or window size.
+  //
+  // Two hotspot types:
+  //   "annotation" — a dot + text label. Double-click it on the page to
+  //                  rename it right there (updates instantly, but only for
+  //                  this browser session — edit the `label` value below
+  //                  for a permanent change).
+  //   "link"       — a plain bubble with no text; clicking it opens the
+  //                  360 panorama overlay for `linkImage`.
   const HOTSPOTS = [
     {
       id: "spot1",
+      type: "annotation",
       label: "Hotspot",
-      onClick: (spot) => {
-        // Customize this: navigate, open the overlay, show info, etc.
-        console.log("Hotspot clicked:", spot.label, "at frame", frame);
-      },
+      keyframes: [
+        { frame: 0,   xPct: 0.3886, yPct: 0.4044 },
+        { frame: 15,  xPct: 0.4464, yPct: 0.3832 },
+        { frame: 30,  xPct: 0.5026, yPct: 0.3802 },
+        { frame: 45,  xPct: 0.5587, yPct: 0.3938 },
+        { frame: 60,  xPct: 0.6097, yPct: 0.4165 },
+        { frame: 75,  xPct: 0.6540, yPct: 0.4528 },
+        { frame: 90,  xPct: 0.6821, yPct: 0.5042 },
+        { frame: 105, xPct: 0.6940, yPct: 0.5678 },
+        { frame: 120, xPct: 0.6761, yPct: 0.6388 },
+        { frame: 135, xPct: 0.6183, yPct: 0.7099 },
+        { frame: 150, xPct: 0.5221, yPct: 0.7553 },
+        { frame: 165, xPct: 0.4064, yPct: 0.7432 },
+        { frame: 180, xPct: 0.3239, yPct: 0.6827 },
+        { frame: 195, xPct: 0.2873, yPct: 0.5935 },
+        { frame: 210, xPct: 0.2967, yPct: 0.5058 },
+        { frame: 225, xPct: 0.3375, yPct: 0.4437 }
+      ]
+    },
+    {
+      // Example "link" hotspot — reuses the same tracked position as spot1
+      // for now. Run the coordinate picker again to get its own position if
+      // you want it somewhere else on the building, then swap the keyframes
+      // list below.
+      id: "spot2",
+      type: "link",
+      linkImage: "HAjj-360_plaza",
       keyframes: [
         { frame: 0,   xPct: 0.3886, yPct: 0.4044 },
         { frame: 15,  xPct: 0.4464, yPct: 0.3832 },
@@ -243,9 +275,30 @@
     return a + (b - a) * t;
   }
 
+  // Circular Catmull-Rom spline: draws a smooth curve THROUGH every keyframe
+  // (rather than straight lines between them), so the hotspot follows a
+  // natural curved path instead of snapping direction at each keyframe —
+  // closely approximating the elliptical path a point traces as an object
+  // rotates, without needing any extra data beyond the keyframes we have.
+  function catmullRom(p0, p1, p2, p3, t) {
+    const t2 = t * t;
+    const t3 = t2 * t;
+    return 0.5 * (
+      (2 * p1) +
+      (-p0 + p2) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t3
+    );
+  }
+
+  function circularKeyframe(keyframes, i) {
+    const n = keyframes.length;
+    return keyframes[((i % n) + n) % n];
+  }
+
   // Finds the two keyframes surrounding `frame` (wrapping from the last
   // keyframe back to the first, since the rotation itself loops) and
-  // linearly interpolates the hotspot's position between them.
+  // spline-interpolates the hotspot's position through them.
   function interpolateHotspot(keyframes, frameIndex, totalFrames) {
     const n = keyframes.length;
     if (n === 0) return null;
@@ -260,33 +313,109 @@
 
       if (frameIndex >= curFrame && frameIndex <= nextFrame) {
         const t = (frameIndex - curFrame) / (nextFrame - curFrame);
+        const p0 = circularKeyframe(keyframes, i - 1);
+        const p3 = circularKeyframe(keyframes, i + 2);
         return {
-          xPct: lerp(cur.xPct, next.xPct, t),
-          yPct: lerp(cur.yPct, next.yPct, t)
+          xPct: catmullRom(p0.xPct, cur.xPct, next.xPct, p3.xPct, t),
+          yPct: catmullRom(p0.yPct, cur.yPct, next.yPct, p3.yPct, t)
         };
       }
     }
     return keyframes[0];
   }
 
-  function drawHotspotMarker(cx, cy) {
+  function roundRectPath(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  // Dot + leader line + editable text pill.
+  function drawAnnotationMarker(spot, cx, cy) {
     const dpr = window.devicePixelRatio || 1;
-    const r = 10 * dpr;
+    const dotR = 7 * dpr;
+    const leaderX = cx + 30 * dpr;
+    const leaderY = cy - 30 * dpr;
 
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(255, 59, 48, 0.35)";
-    ctx.fill();
 
     ctx.beginPath();
-    ctx.arc(cx, cy, r * 0.45, 0, Math.PI * 2);
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(leaderX, leaderY);
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, dotR, 0, Math.PI * 2);
     ctx.fillStyle = "#ff3b30";
     ctx.fill();
     ctx.lineWidth = 2 * dpr;
     ctx.strokeStyle = "#fff";
     ctx.stroke();
+
+    ctx.font = "600 " + (13 * dpr) + "px system-ui, sans-serif";
+    const paddingX = 10 * dpr;
+    const paddingY = 6 * dpr;
+    const textW = ctx.measureText(spot.label).width;
+    const pillW = textW + paddingX * 2;
+    const pillH = 13 * dpr + paddingY * 2;
+    const pillX = leaderX;
+    const pillY = leaderY - pillH / 2;
+
+    roundRectPath(ctx, pillX, pillY, pillW, pillH, 8 * dpr);
+    ctx.fillStyle = "rgba(20, 20, 20, 0.85)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+    ctx.lineWidth = 1 * dpr;
+    ctx.stroke();
+
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(spot.label, pillX + paddingX, pillY + pillH / 2);
     ctx.restore();
+
+    spot._dotX = cx;
+    spot._dotY = cy;
+    spot._dotR = dotR;
+    spot._labelBox = { x: pillX, y: pillY, w: pillW, h: pillH };
+  }
+
+  // Plain circular bubble, no text — click opens the linked 360 panorama.
+  function drawLinkBubble(spot, cx, cy) {
+    const dpr = window.devicePixelRatio || 1;
+    const r = 16 * dpr;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(10, 132, 255, 0.9)";
+    ctx.fill();
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = "#fff";
+    ctx.stroke();
+
+    // Simple ring-and-dot glyph to suggest "360 view" without needing text.
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, r * 0.55, r * 0.32, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 0.18, 0, Math.PI * 2);
+    ctx.fillStyle = "#fff";
+    ctx.fill();
+    ctx.restore();
+
+    spot._dotX = cx;
+    spot._dotY = cy;
+    spot._dotR = r;
+    spot._labelBox = null;
   }
 
   function hitTestHotspot(clientX, clientY) {
@@ -295,12 +424,18 @@
     const scaleY = canvas.height / rect.height;
     const px = (clientX - rect.left) * scaleX;
     const py = (clientY - rect.top) * scaleY;
-    const hitRadius = 22 * (window.devicePixelRatio || 1);
 
     for (const spot of HOTSPOTS) {
-      if (spot._screenX == null) continue;
-      if (Math.hypot(px - spot._screenX, py - spot._screenY) <= hitRadius) {
+      if (spot._dotX == null) continue;
+      const padding = 10 * (window.devicePixelRatio || 1);
+      if (Math.hypot(px - spot._dotX, py - spot._dotY) <= spot._dotR + padding) {
         return spot;
+      }
+      if (spot._labelBox) {
+        const b = spot._labelBox;
+        if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) {
+          return spot;
+        }
       }
     }
     return null;
@@ -340,9 +475,13 @@
     HOTSPOTS.forEach(spot => {
       const pos = interpolateHotspot(spot.keyframes, frame, TOTAL_FRAMES);
       if (!pos) return;
-      spot._screenX = x + pos.xPct * w;
-      spot._screenY = y + pos.yPct * h;
-      drawHotspotMarker(spot._screenX, spot._screenY);
+      const sx = x + pos.xPct * w;
+      const sy = y + pos.yPct * h;
+      if (spot.type === "link") {
+        drawLinkBubble(spot, sx, sy);
+      } else {
+        drawAnnotationMarker(spot, sx, sy);
+      }
     });
   }
 
@@ -430,9 +569,26 @@
     const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
     if (moved <= CLICK_MOVE_THRESHOLD_PX) {
       const hit = hitTestHotspot(e.clientX, e.clientY);
-      if (hit) hit.onClick(hit);
+      if (hit && hit.type === "link") {
+        openOverlay(hit.linkImage, "pano");
+      }
     }
   }
+
+  // Double-click an annotation (its dot or its label) to rename it.
+  // This updates immediately in the page, but only for this browser
+  // session — edit the `label` value in the HOTSPOTS list in the code
+  // for a change that persists after a reload.
+  canvas.addEventListener("dblclick", (e) => {
+    const hit = hitTestHotspot(e.clientX, e.clientY);
+    if (!hit || hit.type !== "annotation") return;
+
+    const next = window.prompt("Edit annotation label:", hit.label);
+    if (next !== null && next.trim() !== "") {
+      hit.label = next.trim();
+      requestDraw();
+    }
+  });
 
   function onWheel(e) {
     e.preventDefault();
