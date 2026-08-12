@@ -146,13 +146,22 @@
 <body>
 
 <canvas id="viewer" role="img" aria-label="Draggable 360-degree rotation viewer"></canvas>
-<div id="status">Loading frames… 0%</div>
+<div id="status">Loading video…</div>
+
+<!-- Off-screen but still decoded/drawable — canvas reads frames from these. -->
+<video id="video-roof" src="ROOF.mp4" muted playsinline preload="auto"
+       aria-hidden="true" tabindex="-1"
+       style="position:fixed; left:-9999px; top:-9999px; width:1px; height:1px;"></video>
+<video id="video-noroof" src="NOROOF.MP4" muted playsinline preload="auto"
+       aria-hidden="true" tabindex="-1"
+       style="position:fixed; left:-9999px; top:-9999px; width:1px; height:1px;"></video>
 
 <div id="nav-buttons">
   <button class="nav-btn" type="button" data-image="6- DEPARTURES PLAZA DROP OFF">DEPARTURES</button>
   <button class="nav-btn" type="button" data-image="3- AERIAL AIRSIDE 2">ARRIVALS</button>
   <button class="nav-btn" type="button" data-image="13- Biennale -  view towards pier">BIENNALE</button>
   <button class="nav-btn" type="button" data-image="HAjj-360_plaza" data-type="pano">360 VIEWER</button>
+  <button class="nav-btn" type="button" id="sequence-toggle-btn">NO ROOF VIEW</button>
 </div>
 
 <div id="overlay" hidden>
@@ -167,12 +176,21 @@
 
 (function () {
   // ---- Config -----------------------------------------------------------
+  // The rotation is now driven by scrubbing a <video>'s currentTime instead
+  // of swapping between hundreds of still images — one file per sequence.
+  const VIDEO_SOURCES = {
+    roof:   { el: document.getElementById("video-roof"),   label: "ROOF VIEW" },
+    noroof: { el: document.getElementById("video-noroof"), label: "NO ROOF VIEW" }
+  };
+  let activeSequenceKey = "roof";
+
+  // Not a real frame count anymore — just the resolution used internally for
+  // drag sensitivity and for the hotspot keyframes below (which were tracked
+  // against the original 240-position rotation, so this keeps that data
+  // valid without needing to re-track everything for the video).
   const TOTAL_FRAMES = 240;
-  const FRAME_DIR = "frames/";
-  const FRAME_PREFIX = "FRAME__";
-  const FRAME_DIGITS = 5;
-  const FRAME_EXT = ".jpg";
-  const DRAG_SENSITIVITY_PX = 5;  // px of drag per frame step
+
+  const DRAG_SENSITIVITY_PX = 5;  // px of drag per "virtual frame" of scrub
   const ZOOM_MIN = 1;
   const ZOOM_MAX = 3;
   const ZOOM_STEP = 0.1;
@@ -182,26 +200,68 @@
   const ctx = canvas.getContext("2d");
   const statusEl = document.getElementById("status");
 
-  let frame = 0;
+  let frame = 0;       // continuous virtual position, 0 .. TOTAL_FRAMES (wraps)
   let zoom = ZOOM_MIN;
-  let images = [];
-  let loadedCount = 0;
   let ready = false;
   let dragging = false;
   let lastX = 0;
   let pendingDraw = false;
+  let seekPending = false;
 
-  // ---- Build a safe frame URL --------------------------------------------
-  // Index is always an internally generated integer, never taken from user
-  // input or the URL, so there is no path-traversal / injection risk here.
-  // clamp() guarantees it stays a valid in-range integer regardless.
-  function frameUrl(i) {
-    const safeIndex = clamp(Math.trunc(i), 0, TOTAL_FRAMES - 1);
-    return FRAME_DIR + FRAME_PREFIX + String(safeIndex).padStart(FRAME_DIGITS, "0") + FRAME_EXT;
+  function activeVideo() {
+    return VIDEO_SOURCES[activeSequenceKey].el;
   }
 
   function clamp(v, min, max) {
     return Math.min(max, Math.max(min, v));
+  }
+
+  // Converts the virtual frame position into the active video's currentTime
+  // and seeks there. No-ops until that video's duration is actually known.
+  function seekToFrame(f) {
+    const video = activeVideo();
+    if (!video || !isFinite(video.duration) || video.duration <= 0) return;
+    const norm = ((f % TOTAL_FRAMES) + TOTAL_FRAMES) % TOTAL_FRAMES;
+    const t = (norm / TOTAL_FRAMES) * video.duration;
+    video.currentTime = Math.min(Math.max(t, 0), video.duration - 0.001);
+  }
+
+  // Actual video seeks are somewhat expensive, so no matter how many drag
+  // events fire, we only ever issue one pending seek per animation frame.
+  function requestSeek() {
+    if (seekPending) return;
+    seekPending = true;
+    requestAnimationFrame(() => {
+      seekPending = false;
+      seekToFrame(frame);
+    });
+  }
+
+  function setupVideos() {
+    Object.keys(VIDEO_SOURCES).forEach(key => {
+      const el = VIDEO_SOURCES[key].el;
+
+      el.addEventListener("loadedmetadata", () => {
+        if (key === activeSequenceKey) {
+          ready = true;
+          statusEl.hidden = true;
+          seekToFrame(frame);
+        }
+      });
+
+      // The canvas only redraws once the video has actually landed on the
+      // requested time, so the on-screen frame and the hotspot markers
+      // (computed from the same `frame` value) never fall out of sync.
+      el.addEventListener("seeked", () => {
+        if (key === activeSequenceKey) requestDraw();
+      });
+
+      el.addEventListener("error", () => {
+        statusEl.hidden = false;
+        statusEl.textContent = "Couldn't load " + VIDEO_SOURCES[key].label +
+          " — check the filename and that it's next to index.html.";
+      });
+    });
   }
 
   // ---- Hotspots ------------------------------------------------------------
@@ -487,17 +547,17 @@
   }
 
   function draw() {
-    const img = images[frame];
+    const video = activeVideo();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (!img || !img.complete || img.naturalWidth === 0) return;
+    if (!video || video.readyState < 2) return; // HAVE_CURRENT_DATA or better
 
     const w = canvas.width * zoom;
     const h = canvas.height * zoom;
     const x = (canvas.width - w) / 2;
     const y = (canvas.height - h) / 2;
 
-    ctx.drawImage(img, x, y, w, h);
+    ctx.drawImage(video, x, y, w, h);
 
     HOTSPOTS.forEach(spot => {
       const pos = interpolateHotspot(spot.keyframes, frame, TOTAL_FRAMES);
@@ -510,50 +570,6 @@
         drawAnnotationMarker(spot, sx, sy);
       }
     });
-  }
-
-  // ---- Preload frames ---------------------------------------------------
-  function preloadFrames() {
-    let failed = 0;
-
-    for (let i = 0; i < TOTAL_FRAMES; i++) {
-      const img = new Image();
-
-      img.onload = () => {
-        loadedCount++;
-        onFrameSettled();
-      };
-      img.onerror = () => {
-        failed++;
-        loadedCount++;
-        console.warn("Failed to load frame " + i + ": " + img.src);
-        onFrameSettled();
-      };
-
-      img.src = frameUrl(i);
-      images[i] = img;
-    }
-
-    function onFrameSettled() {
-      const pct = Math.round((loadedCount / TOTAL_FRAMES) * 100);
-      statusEl.textContent = "Loading frames… " + pct + "%";
-
-      // Let the viewer start as soon as the first frame is in, so the user
-      // isn't staring at a blank screen; keep loading the rest in background.
-      if (!ready && images[0] && images[0].complete) {
-        ready = true;
-        statusEl.hidden = true;
-        requestDraw();
-      }
-
-      if (loadedCount === TOTAL_FRAMES) {
-        statusEl.hidden = true;
-        if (failed > 0) {
-          console.warn(failed + " of " + TOTAL_FRAMES + " frames failed to load.");
-        }
-        requestDraw();
-      }
-    }
   }
 
   // ---- Pointer-based drag (works for mouse + touch + pen) -----------------
@@ -578,12 +594,9 @@
     }
 
     const delta = e.clientX - lastX;
-    if (Math.abs(delta) < DRAG_SENSITIVITY_PX) return;
-
-    const steps = Math.trunc(delta / DRAG_SENSITIVITY_PX);
-    frame = ((frame - steps) % TOTAL_FRAMES + TOTAL_FRAMES) % TOTAL_FRAMES;
     lastX = e.clientX;
-    requestDraw();
+    frame = ((frame - delta / DRAG_SENSITIVITY_PX) % TOTAL_FRAMES + TOTAL_FRAMES) % TOTAL_FRAMES;
+    requestSeek();
   }
 
   function onPointerUp(e) {
@@ -905,6 +918,24 @@
     };
   })();
 
+  // ---- Roof / no-roof sequence toggle --------------------------------------
+  const sequenceToggleBtn = document.getElementById("sequence-toggle-btn");
+
+  function switchSequence(key) {
+    if (key === activeSequenceKey) return;
+    activeSequenceKey = key;
+    // Button always shows the OTHER sequence (i.e. what clicking it does next).
+    const otherKey = activeSequenceKey === "roof" ? "noroof" : "roof";
+    sequenceToggleBtn.textContent = VIDEO_SOURCES[otherKey].label;
+    seekToFrame(frame); // rotation angle is kept as-is on purpose; no-ops
+                         // silently if this video's metadata isn't loaded
+                         // yet — its own loadedmetadata handler covers that.
+  }
+
+  sequenceToggleBtn.addEventListener("click", () => {
+    switchSequence(activeSequenceKey === "roof" ? "noroof" : "roof");
+  });
+
   // ---- Wire up events -------------------------------------------------------
   window.addEventListener("resize", resizeCanvas);
   canvas.addEventListener("pointerdown", onPointerDown);
@@ -916,7 +947,7 @@
 
   // ---- Go ---------------------------------------------------------------
   resizeCanvas();
-  preloadFrames();
+  setupVideos();
 })();
 </script>
 
